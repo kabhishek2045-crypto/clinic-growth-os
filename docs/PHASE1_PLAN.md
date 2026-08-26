@@ -389,3 +389,24 @@ required before M2 proceeds. Two strategic challenges remain open by the user's 
 - UC2: no design partner exists; whether to gate M4 on signed clinics. Left open.
 - Open decisions 5-12 from this plan remain unanswered, of which #9 (data residency)
   gates M5 rather than M13, and #6 (WhatsApp BSP) must start now for template lead time.
+
+## Post-review hardening status
+
+| Item | State | Where |
+|---|---|---|
+| Five verified defects in shipped code | done | `bc08199` |
+| Public + patient principals (blocked M3) | done | `d98cef9` |
+| Explicit, time-bounded, recorded elevation | done | `3fb19aa` |
+| Tagged-template query seam + import lint rule | done | `335d5b6` |
+| Composite-FK regression test | done | this commit |
+| Policies re-deriving membership from current_user_id | OPEN | eng finding 2 |
+| Better Auth reconciliation spike (uuid vs string ids, schema, DDL) | OPEN | eng finding 10, M2 blocker |
+| Connection-identity assertion in getPool() | OPEN | eng finding 4 |
+| 20 tables carry `clinic_id` with no FK to `clinics` | OPEN | eng finding 14 |
+
+The `clinic_id` gap is a decision, not a fix: clinic is currently an operational
+scope rather than a security boundary, so `clinic_id` can hold any uuid including
+another organization's clinic. Open decision 5 (multi-location UI) cannot be a
+flag flip until either the composite `(organization_id, clinic_id)` references are
+added to those 20 tables while they are still empty, or `app.current_clinic_ids()`
+is deleted and the operational-only status documented loudly.
