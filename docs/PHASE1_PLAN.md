@@ -11,7 +11,7 @@ Branch: `main` · Base: `main` · Platform: GitHub (`sddigital/Clinic-OS`)
 
 ## 1. Where the build actually is
 
-**Shipped and green** (CI passing, 39 tests against real Neon and an embedded Postgres):
+**Shipped and green** (CI passing, 128 tests against real Neon and an embedded Postgres):
 
 - **M0 — scaffold + tenant-isolation spike** (`f611747`). Next.js 15 / React 19 / TS strict,
   Tailwind, Drizzle, eight `§46` provider interfaces with mocks, CI. Two database roles
@@ -26,10 +26,19 @@ Branch: `main` · Base: `main` · Platform: GitHub (`sddigital/Clinic-OS`)
   after the suite found that FK validation bypasses RLS and all 51 single-column FKs to
   tenant-owned parents were cross-tenant holes. `EXCLUDE` constraint prevents double
   booking. Per-line tax treatment with `exempt` distinct from 0%.
+- **Post-review hardening** (`bc08199` .. `301376c`), migrations 0003-0009. Not a milestone;
+  the result of the /autoplan review below. Five verified defects in shipped code; public and
+  patient principals, which M3 could not have started without; explicit, time-bounded,
+  recorded elevation; a tagged-template query seam that makes a raw SQL string a type error;
+  Better Auth's tables isolated behind their own role; composite `clinic_id` references;
+  and policies that re-derive membership instead of trusting a forgeable session variable.
+  All nine review findings closed.
 - **Infrastructure.** Neon `young-fog-22492298`, `aws-ap-southeast-1`, Postgres 17.
   Vercel connected, functions pinned to `bom1`.
 
-**Not built:** authentication, every product surface, every provider implementation.
+**Not built:** every product surface. No authentication flow, no screens, no routes beyond a
+placeholder page. Two of thirteen milestones are done; the hardening above is depth on those
+two, not progress through the remaining eleven.
 
 ---
 
@@ -47,13 +56,34 @@ Branch: `main` · Base: `main` · Platform: GitHub (`sddigital/Clinic-OS`)
 ## 3. Remaining milestones
 
 ### M2 — Better Auth, RBAC, clinic switcher
-Better Auth (pinned exact) for email/password, sessions, password reset. Its generated
-tables reconcile with `clinic_users.user_id`, which currently has no FK. Nine roles and the
-permission catalogue seeded in M1 become real checks: `requireClinicRole()`,
-`user_has_permission()`. Clinic switcher validates the active clinic against membership
-server-side on every request. Platform and clinic administration fully separated (§13).
-**Risk:** this is where tenant isolation could quietly regress — `withTenant()` currently
-trusts its caller to have verified the session, a contract enforced only by convention.
+
+Already done by the spike, so not part of this milestone: Better Auth is pinned exact, its
+four tables live in schema `app` with uuid keys behind the `clinic_os_auth` role, and
+`clinic_users.user_id` and `platform_admins.user_id` carry real foreign keys to
+`app."user"`. `src/lib/auth/index.ts` holds the verified configuration.
+
+What remains is application wiring:
+
+- Sign-up, sign-in, sign-out and password reset routes, using the existing auth instance.
+- Nine roles and the permission catalogue seeded in M1 become real checks:
+  `requireClinicRole()`, `user_has_permission()`. The catalogue exists; nothing reads it.
+- Clinic switcher, with the active clinic re-validated against membership server-side on
+  every request rather than trusted from a cookie.
+- Platform and clinic administration fully separated (§13).
+- **Close the contract gap.** `withTenant(userId: string, …)` still trusts its caller to
+  have verified the session. Replace the parameter with a branded `VerifiedSession` that
+  only the session verifier can construct, so skipping verification is a type error rather
+  than a code-review miss. Do this while there are few call sites.
+- Seed script for §60's two example tenants, sharing the fixture code that now creates
+  real Better Auth users.
+- Sentry or equivalent, plus wiring `error_events` — which migration 0003 had to make
+  writable before this was possible at all.
+- Patient identity per the reversed decision 4: phone + OTP, with a household person-picker
+  after OTP because one number maps to several patients. `app.set_patient_context` exists.
+
+**Risk:** this is still where tenant isolation could quietly regress. The hardening narrowed
+what a mistake costs — forged claims are now re-derived, and raw SQL is a type error — but
+the caller contract itself is unchanged until the first item above is done.
 
 ### M3 — Domain resolution, middleware, branding
 `resolveTenantFromHost()` against every case in §10: localhost, wildcard subdomains, Vercel
@@ -85,10 +115,16 @@ verification; webhook idempotency already enforced by a unique `provider_event_i
 Eleven templates, SEO and metadata, public booking with rate limiting and anti-spam, lead
 capture with UTM attribution preserved through to the appointment (§15, §16, §29).
 
-### M10 — Events, communication, follow-ups, automation v1
+### M10a — Events: the transactional outbox
 Transactional outbox drained by a Vercel Cron worker using `FOR UPDATE SKIP LOCKED`.
+`domain_events.status='dead'` wired for poison messages, with alerting. This is
+infrastructure the next milestone depends on, which is why it is separate: bundled, nothing
+was testable until all five subsystems landed.
+
+### M10b — Communication, follow-ups, automation v1
 WhatsApp workflows from §25. Consent and opt-out enforced before every send. Automation runs
-idempotent and proven not to double-execute.
+idempotent and proven not to double-execute. Requires the BSP decision (open decision 6) to
+have been made and templates submitted, which is why that decision is dated to M8.
 
 ### M11 — Dashboard, subscriptions, platform admin
 §28 metrics, each with a documented calculation and period comparison, no fabricated
@@ -107,12 +143,29 @@ Mobile-first PWA: appointments, prescriptions, invoices, documents, follow-ups.
 
 ## 4. Open decisions — carried forward, still unanswered
 
-Decisions 1–4 were settled at approval (Drizzle; organization as security boundary;
-Better Auth core with our own permission tables; patients as a separate principal type).
-These are not:
+Decisions 1-4 were settled at approval, with two later corrections worth recording:
+
+- **1 (Drizzle over Prisma)** was approved and then not implemented. `drizzle-orm` and
+  `drizzle-kit` are installed with zero imports and no `drizzle.config.ts`; every query goes
+  through raw SQL behind the `sql` tag in `src/lib/db/sql.ts`. They were upgraded during the
+  Better Auth spike only to satisfy a peer range. Either wire Drizzle in M2 while there are
+  few call sites, or reverse the decision and drop the dependency. Leaving it as-is is the
+  worst of both.
+- **2 (organization as the security boundary)** holds and is now enforced everywhere.
+- **3 (Better Auth core plus our own permission tables)** holds; see migration 0006.
+- **4 (patients as a separate principal, email magic-link first)** was REVERSED by the design
+  review. One phone number legitimately maps to several household members — grandmother,
+  parents, two children — so phone alone is not identity either, and many patients have no
+  email. The replacement, logged as audit decision 22, is phone + OTP with a post-OTP
+  household person-picker. The separate-principal half survives and is built
+  (`app.set_patient_context`); the email-first half does not.
+
+These remain genuinely open:
 
 5. **Multi-location in the MVP UI?** Proceeding as: schema supports it, UI ships
-   single-location behind a flag. Affects M4 and M6.
+   single-location behind a flag. Affects M4 and M6. Note this was only ever true in
+   principle: until migration 0007, twenty tables carried an unconstrained `clinic_id`, so
+   turning the flag on would have returned other locations' rows. It is a real flag flip now.
 6. **WhatsApp — Meta Cloud API direct, or an Indian BSP?** Template approval has real lead
    time; the §25 templates must be submitted before M10 can be tested against anything real.
    Needs deciding by M8.
@@ -122,7 +175,12 @@ These are not:
 8. **ICD-10 depth.** Proceeding as: full code stored nullable, UI driven by a curated
    per-specialty shortlist of 20–40 conditions. Affects M5 and, later, §32.8.
 9. **Data residency.** Neon has no India region; the project is in Singapore. Needs an
-   Indian data-protection lawyer before the first real patient record. Affects M13.
+   Indian data-protection lawyer before the first real patient record. **Originally scheduled
+   at M13; the eng review argued it gates M5** — if the answer is "records must stay in
+   India", the remedy is a Postgres provider migration, and the repo already contains
+   Neon-specific hardening (`0001`'s role model, `0008`'s BYPASSRLS definer), so the coupling
+   is real. It costs weeks of calendar time and no engineering time, so it should start now
+   regardless of what is built next.
 10. **Prescription legal requirements.** NMC registration number is modelled on `doctors`;
     signature handling and telemedicine guidelines need legal review before M7 ships.
 11. **First design-partner clinic's specialty** (§63.4). Decides which of the eleven website
@@ -134,22 +192,40 @@ These are not:
 
 ## 5. Known weaknesses in this plan
 
-Stated plainly so the review has something real to attack:
+Stated plainly so the review has something real to attack. Status is current as of the
+post-review hardening; an item is only marked RESOLVED when something in the repo enforces it.
 
-- **Milestone sizing is uneven.** M10 bundles the event system, three communication
-  channels, follow-ups, and the automation engine. It is plausibly three milestones.
-- **The M2 contract gap.** `withTenant(userId, …)` trusts its caller to have verified the
-  session. Nothing enforces that today.
-- **No seed script.** §60 wants two fully populated example tenants; they exist only as test
-  fixtures.
-- **Vercel deploys without waiting for CI.** Branch protection requiring the `verify` check
-  is not yet configured, so a commit breaking tenant isolation would still deploy.
-- **`embedded-postgres` pulls a 144 MB binary into every Vercel build.** Cached, not fatal,
-  but wasteful.
-- **No observability.** §43 wants error, latency, and job monitoring. It appears nowhere in
-  M2–M13 except implicitly in M13.
-- **The 30-minute onboarding target in M4 is asserted, not derived.** Nothing establishes it
-  is achievable with the §40 step list.
+- **RESOLVED — Milestone sizing.** M10 bundled the event system, three communication
+  channels, follow-ups and the automation engine. Split into M10a and M10b in §3 above.
+- **OPEN — The M2 contract gap.** `withTenant(userId: string, …)` still trusts its caller to
+  have verified the session, enforced by convention alone. The review auto-decided a branded
+  `VerifiedSession` type that only the session verifier can construct, so skipping
+  verification becomes a type error. That is M2 work and it is not done. Note that the
+  hardening did narrow the blast radius — the tagged-template seam and derived membership
+  mean a forged claim now buys far less — but the contract itself is unchanged.
+- **OPEN — No seed script.** §60 wants two fully populated example tenants; they exist only
+  as test fixtures. M2 is the natural home, since the fixtures now create real Better Auth
+  users and a seed script would share that code.
+- **OPEN, and the recommended fix is unavailable — Vercel deploys without waiting for CI.**
+  A commit breaking tenant isolation would still deploy. The obvious remedy, branch
+  protection requiring the `verify` check, cannot be configured on this repository:
+
+      GET /repos/sddigital/Clinic-OS/branches/main/protection
+      403 — Upgrade to GitHub Pro or make this repository public
+
+  Two options that do work: upgrade the plan, or set Vercel's Ignored Build Step to a command
+  that exits non-zero when the commit's CI check is not green. The second works on any plan
+  and is the cheaper answer. Until one is done, CI is advisory for deploys.
+- **OPEN — `embedded-postgres` pulls a 144 MB binary into every Vercel build.** Cached, not
+  fatal, but wasteful. It buys the property that any collaborator can run the isolation suite
+  with no Docker and no install, which is worth keeping until it actually hurts.
+- **OPEN — No observability.** §43 wants error, latency and job monitoring. The review
+  accepted folding it into each milestone rather than deferring to M13, but nothing is built.
+  Note that `error_events` was unwritable until migration 0003 fixed it, so the M2
+  observability decision would have landed on a table the application could not insert into.
+- **OPEN — The 30-minute onboarding target in M4 is asserted, not derived.** Nothing
+  establishes it is achievable with the §40 step list, and the list ends with DNS
+  configuration, which nobody completes in one sitting.
 
 ---
 
@@ -281,7 +357,7 @@ in M3; M9 ships a booking that sends the patient nothing because WhatsApp is M10
 | E8 | P2 | 10/10 | package.json:14 | next lint deprecated, removed in Next 16, CI depends on it |
 | E9 | P2 | 8/10 | — | No E2E runner installed; §48 acceptance has nothing to run on |
 
-## Phase 3 — verified defects in SHIPPED code (M0/M1)
+## Phase 3 — verified defects in SHIPPED code (M0/M1) — all fixed in 0003
 
 Found by the eng outside voice, each verified independently before being recorded.
 
@@ -293,7 +369,7 @@ Found by the eng outside voice, each verified independently before being recorde
 | C4 | `tests/rls/schema.test.ts:247` | Comment says "NOT inside one transaction"; code opens BEGIN and does both INSERTs inside it | Real concurrency makes the second inserter block, not fail. The path M6 will hit is untested. |
 | C5 | `0002:1350` | `audit_logs` / `access_logs` get `FOR ALL` | Any org member, including `read_only_staff`, can DELETE their own audit trail. |
 
-## Phase 3 — architectural gap that blocks M3
+## Phase 3 — architectural gap that blocked M3 (resolved)
 
 `app.set_tenant_context()` derives access solely from `clinic_users`. There is no
 anonymous, system, or patient principal. Consequences, by milestone:
@@ -363,33 +439,6 @@ trusting a pre-computed array) remains open.
 | 39 | Eng | global-setup uses scripts/migrate.ts; CI runs migrate twice | Mechanical | P1 | Re-run and populated-DB paths never tested |
 | 40 | Eng | getProviders() throws in production if any slot is a mock | Mechanical | P1 | mockDomain returns verified:true always |
 
-## GSTACK REVIEW REPORT
-
-| Run | Voice | Status | Findings |
-|---|---|---|---|
-| Phase 1 CEO | Claude subagent | complete | 14 (4 critical, 6 high) |
-| Phase 1 CEO | Codex | unavailable | — |
-| Phase 2 Design | Claude subagent | complete | 20 (6 critical, 9 high) |
-| Phase 2 Design | Codex | unavailable | — |
-| Phase 3 Eng | Claude subagent | complete | 19 (3 critical, 9 high) |
-| Phase 3 Eng | Codex | unavailable | — |
-| Phase 3.5 DX | — | skipped | not a developer-facing product |
-
-Scores: CEO premises 2/6 hold · Design composite 1.3/10 · Eng 2 P0 + 5 verified defects
-in shipped code. Cross-model consensus: 0/19 confirmed (Codex not installed); 12
-independent agreements across separate voices.
-
-VERDICT: APPROVED WITH REVISIONS (option C-revised). 40 decisions logged. Engineering
-fixes and the two low-cost challenges accepted. The public/patient principal model is
-required before M2 proceeds. Two strategic challenges remain open by the user's choice.
-
-**UNRESOLVED DECISIONS:**
-- UC1: MASTER_PROMPT §49 (defer all visualization) contradicts §50 (the visual layer
-  should be the headline, not a Phase 2 footnote). Left open.
-- UC2: no design partner exists; whether to gate M4 on signed clinics. Left open.
-- Open decisions 5-12 from this plan remain unanswered, of which #9 (data residency)
-  gates M5 rather than M13, and #6 (WhatsApp BSP) must start now for template lead time.
-
 ## Post-review hardening status
 
 | Item | State | Where |
@@ -398,18 +447,19 @@ required before M2 proceeds. Two strategic challenges remain open by the user's 
 | Public + patient principals (blocked M3) | done | `d98cef9` |
 | Explicit, time-bounded, recorded elevation | done | `3fb19aa` |
 | Tagged-template query seam + import lint rule | done | `335d5b6` |
-| Composite-FK regression test | done | this commit |
+| Composite-FK regression test | done | `5cf3542` |
 | Policies re-deriving membership from current_user_id | done | migrations 0008 + 0009 |
 | Better Auth reconciliation spike | done | migration 0006 + src/lib/auth |
 | Connection-identity assertion in getPool() | done | `1673f4f` |
 | 20 tables carry `clinic_id` with no FK to `clinics` | done | migration 0007 |
 
-The `clinic_id` gap is a decision, not a fix: clinic is currently an operational
-scope rather than a security boundary, so `clinic_id` can hold any uuid including
-another organization's clinic. Open decision 5 (multi-location UI) cannot be a
-flag flip until either the composite `(organization_id, clinic_id)` references are
-added to those 20 tables while they are still empty, or `app.current_clinic_ids()`
-is deleted and the operational-only status documented loudly.
+Note on `clinic_id`: this was originally recorded as a decision rather than a fix, on the
+grounds that clinic is an operational scope rather than a security boundary. That framing was
+wrong. The column could hold any uuid including another organization's clinic, and RLS did not
+object because every policy keys on `organization_id` — so open decision 5's description of
+multi-location UI as "a flag flip" was untrue. Migration 0007 added the composite
+`(organization_id, clinic_id)` references to all twenty tables, and two invariants now hold
+the line. Decision 5 is a genuine flag flip today; it was not before.
 
 ### Better Auth spike result (migration 0006)
 
@@ -433,3 +483,38 @@ total SQL injection in the tenant path cannot read a session token or a password
 `app."user"`. Applying 0006 to a populated database needs the NOT VALID -> backfill ->
 VALIDATE sequence documented in the migration; it failed on first run against dev data
 holding fixture rows, which is decision 16's two-deploy case arriving on schedule.
+
+---
+
+## GSTACK REVIEW REPORT
+
+| Run | Voice | Status | Findings |
+|---|---|---|---|
+| Phase 1 CEO | Claude subagent | complete | 14 (4 critical, 6 high) |
+| Phase 1 CEO | Codex | unavailable | — |
+| Phase 2 Design | Claude subagent | complete | 20 (6 critical, 9 high) |
+| Phase 2 Design | Codex | unavailable | — |
+| Phase 3 Eng | Claude subagent | complete | 19 (3 critical, 9 high) |
+| Phase 3 Eng | Codex | unavailable | — |
+| Phase 3.5 DX | — | skipped | not a developer-facing product |
+
+Scores: CEO premises 2/6 hold · Design composite 1.3/10 · Eng 2 P0 + 5 verified defects
+in shipped code. Cross-model consensus: 0/19 confirmed (Codex not installed); 12
+independent agreements across separate voices.
+
+VERDICT: APPROVED WITH REVISIONS (option C-revised). 40 decisions logged. Engineering
+fixes and the two low-cost challenges accepted. The public/patient principal model is
+required before M2 proceeds. Two strategic challenges remain open by the user's choice.
+
+**UNRESOLVED DECISIONS:**
+- UC1: MASTER_PROMPT §49 (defer all visualization) contradicts §50 (the visual layer
+  should be the headline, not a Phase 2 footnote). Left open by explicit choice.
+- UC2: no design partner exists; whether to gate M4 on signed clinics. Left open.
+- Decision 1 (Drizzle) was approved and never implemented — wire it in M2 or reverse it.
+- Decision 4 (patient identity) was reversed by the design review; phone + OTP with a
+  household person-picker replaces email magic-link. Not yet built.
+- Open decisions 5-12 remain, of which #9 (data residency) gates M5 rather than M13 and
+  #6 (WhatsApp BSP) must start now for template lead time. Both cost calendar time and
+  no engineering time.
+- Branch protection requiring `verify` cannot be configured on this plan, so CI is
+  advisory for deploys until Vercel's Ignored Build Step is wired to the check.
