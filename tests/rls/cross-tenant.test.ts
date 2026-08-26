@@ -112,10 +112,10 @@ describe('Clinic A cannot reach Clinic B', () => {
   it('SELECT returns only its own patients', async () => {
     const rows = await asUser(fx.userA, async (c) => {
       const r = await c.query<{ id: string }>('SELECT id FROM app.patients');
-      return r.rows;
+      return r.rows.map((x) => x.id);
     });
-    expect(rows).toHaveLength(1);
-    expect(rows[0]?.id).toBe(fx.patientA);
+    expect([...rows].sort()).toEqual([fx.patientA, fx.patientA2].sort());
+    expect(rows).not.toContain(fx.patientB);
   });
 
   it("SELECT by B's primary key returns nothing — not an error, nothing", async () => {
@@ -182,8 +182,8 @@ describe('Clinic A cannot reach Clinic B', () => {
       const orgs = await c.query('SELECT id FROM app.organizations');
       return { joined: joined.rows.length, counted: counted.rows[0]?.n, orgs: orgs.rows.length };
     });
-    expect(out.joined).toBe(1);
-    expect(out.counted).toBe('1');
+    expect(out.joined).toBe(2);
+    expect(out.counted).toBe('2');
     expect(out.orgs).toBe(1);
   });
 
@@ -240,7 +240,7 @@ describe('context does not survive the connection', () => {
     // if the transaction had not been closed, A's rows would appear here.
     await asUser(fx.userA, async (c) => {
       const r = await c.query('SELECT id FROM app.patients');
-      expect(r.rows).toHaveLength(1);
+      expect(r.rows).toHaveLength(2);
     });
 
     for (let i = 0; i < 6; i += 1) {
@@ -259,18 +259,21 @@ describe('context does not survive the connection', () => {
     const b = await asUser(fx.userB, async (c) =>
       (await c.query<{ id: string }>('SELECT id FROM app.patients')).rows.map((r) => r.id),
     );
-    expect(a).toEqual([fx.patientA]);
+    expect([...a].sort()).toEqual([fx.patientA, fx.patientA2].sort());
     expect(b).toEqual([fx.patientB]);
+    // The point of the assertion: no id from one tenant appears in the other.
+    expect(a).not.toContain(fx.patientB);
+    expect(b).not.toContain(fx.patientA);
   });
 });
 
 describe('platform administration is separate and explicit', () => {
   it('a platform admin can cross tenants', async () => {
     const rows = await asUser(fx.adminUser, async (c) => {
-      const r = await c.query('SELECT id FROM app.patients');
-      return r.rows;
+      const r = await c.query<{ id: string }>('SELECT id FROM app.patients');
+      return r.rows.map((x) => x.id);
     });
-    expect(rows).toHaveLength(2);
+    expect([...rows].sort()).toEqual([fx.patientA, fx.patientA2, fx.patientB].sort());
   });
 
   it('a clinic user cannot read the platform_admins table', async () => {

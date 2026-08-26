@@ -1,16 +1,15 @@
-import { mkdtemp, rm } from 'node:fs/promises';
+import { mkdtemp, readdir, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { readFile } from 'node:fs/promises';
 import EmbeddedPostgres from 'embedded-postgres';
 import { Client } from 'pg';
-import { config as loadEnv } from 'dotenv';
+import { loadLocalEnv } from '../src/config/load-env';
 
-// globalSetup runs before setupFiles, and dotenv's default entrypoint only reads
-// `.env`. Load `.env.local` here explicitly, or a configured Neon connection is
-// silently ignored and the suite quietly falls back to the embedded server.
-loadEnv({ path: '.env.local', quiet: true });
-loadEnv({ quiet: true });
+// globalSetup runs before setupFiles, and dotenv's default entrypoint reads only
+// `.env`. Without this a configured Neon connection is silently ignored and the
+// suite quietly falls back to the embedded server.
+loadLocalEnv();
 
 /**
  * §47, §62.3 — the acceptance gate is the test suite, and it must be runnable by
@@ -66,11 +65,19 @@ export async function setup(): Promise<void> {
   const ownerUrl = `postgresql://postgres:postgres@localhost:${port}/clinic_os`;
   const appUrl = `postgresql://clinic_os_app:${APP_PASSWORD}@localhost:${port}/clinic_os`;
 
-  // Migrations run as the owner.
+  // Migrations run as the owner. Discovered and applied in order rather than
+  // named: a hardcoded filename silently stops covering migrations added later,
+  // which is how the isolation suite ended up running against a schema that was
+  // one migration behind.
   const owner = new Client({ connectionString: ownerUrl });
   await owner.connect();
-  const sql = await readFile(join(process.cwd(), 'migrations', '0001_tenancy_spike.sql'), 'utf8');
-  await owner.query(sql);
+  const migrationsDir = join(process.cwd(), 'migrations');
+  const files = (await readdir(migrationsDir)).filter((f) => f.endsWith('.sql')).sort();
+  if (files.length === 0) throw new Error('no migrations found in migrations/');
+  for (const file of files) {
+    await owner.query(await readFile(join(migrationsDir, file), 'utf8'));
+  }
+  console.log(`[rls] applied ${files.length} migration(s)`);
   // The migration creates clinic_os_app NOLOGIN. Tests must actually connect as
   // it, so grant it a login here — local and ephemeral, never in production.
   await owner.query(`ALTER ROLE clinic_os_app LOGIN PASSWORD '${APP_PASSWORD}'`);

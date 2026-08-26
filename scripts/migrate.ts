@@ -1,7 +1,9 @@
 import { readdir, readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { Client } from 'pg';
-import 'dotenv/config';
+import { loadLocalEnv } from '../src/config/load-env';
+
+loadLocalEnv();
 
 /**
  * §38, §44 — migrations run as the OWNER role over the UNPOOLED connection.

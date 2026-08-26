@@ -64,6 +64,16 @@ asserts this explicitly (`cannot REACH a role that has BYPASSRLS or SUPERUSER`).
 
 Point `DATABASE_URL` at the **pooled** endpoint and `DATABASE_URL_UNPOOLED` at the direct one.
 
+### Never drop the app role on a live Neon project
+
+`npm run db:reset` drops the schema and leaves `clinic_os_app` alone, deliberately. Dropping and
+recreating that role wedges Neon's connection pooler: it caches the role's OID, and every pooled
+connection then fails with `invalid role OID` and afterwards `permission denied for schema app`,
+while `has_schema_privilege` reports the grants are fine and the direct endpoint keeps working. It
+reads exactly like an RLS bug and is not one. Recovering meant recreating the project.
+
+Set the role's password once, at project setup. Reset the schema as often as you like.
+
 ## Running the RLS suite
 
 ```bash

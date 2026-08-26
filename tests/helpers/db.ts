@@ -36,10 +36,16 @@ export interface Fixture {
   clinicA: string;
   userA: string;
   patientA: string;
+  patientA2: string;
+  householdA: string;
+  conditionA: string;
+  doctorA: string;
   orgB: string;
   clinicB: string;
   userB: string;
   patientB: string;
+  householdB: string;
+  conditionB: string;
   adminUser: string;
   strangerUser: string;
 }
@@ -92,22 +98,106 @@ export async function seed(owner: Client): Promise<Fixture> {
     [orgB, clinicB],
   );
 
+  // §60 — "at least one household with multiple linked patients and one tagged
+  // health_condition per tenant, to exercise the Family Health Graph."
+  const patientA2 = await one(
+    `INSERT INTO app.patients (organization_id, clinic_id, full_name, phone)
+     VALUES ($1, $2, 'Rohan Patel', '+919000000003') RETURNING id`,
+    [orgA, clinicA],
+  );
+  const householdA = await one(
+    `INSERT INTO app.households (organization_id, clinic_id, name, primary_contact_patient_id)
+     VALUES ($1, $2, 'Patel family', $3) RETURNING id`,
+    [orgA, clinicA, patientA],
+  );
+  await owner.query(
+    `INSERT INTO app.patient_household_links (organization_id, patient_id, household_id, relationship)
+     VALUES ($1, $2, $3, 'self'), ($1, $4, $3, 'child')`,
+    [orgA, patientA, householdA, patientA2],
+  );
+  const conditionA = await one(
+    `INSERT INTO app.health_conditions
+       (organization_id, clinic_id, patient_id, condition_code, display_name, status)
+     VALUES ($1, $2, $3, 'E11', 'Type 2 diabetes mellitus', 'chronic') RETURNING id`,
+    [orgA, clinicA, patientA],
+  );
+
+  const householdB = await one(
+    `INSERT INTO app.households (organization_id, clinic_id, name)
+     VALUES ($1, $2, 'Rao family') RETURNING id`,
+    [orgB, clinicB],
+  );
+  await owner.query(
+    `INSERT INTO app.patient_household_links (organization_id, patient_id, household_id, relationship)
+     VALUES ($1, $2, $3, 'self')`,
+    [orgB, patientB, householdB],
+  );
+  const conditionB = await one(
+    `INSERT INTO app.health_conditions
+       (organization_id, clinic_id, patient_id, condition_code, display_name, status)
+     VALUES ($1, $2, $3, 'J30', 'Allergic rhinitis', 'active') RETURNING id`,
+    [orgB, clinicB, patientB],
+  );
+
+  const doctorA = await one(
+    `INSERT INTO app.doctors (organization_id, full_name, specialty, registration_number)
+     VALUES ($1, 'Dr Meera Shah', 'General Physician', 'NMC-000001') RETURNING id`,
+    [orgA],
+  );
+
   return {
     orgA,
     clinicA,
     userA,
     patientA,
+    patientA2,
+    householdA,
+    conditionA,
+    doctorA,
     orgB,
     clinicB,
     userB,
     patientB,
+    householdB,
+    conditionB,
     adminUser,
     strangerUser,
   };
 }
 
+/**
+ * Truncates tenant data, leaving the platform catalogue (roles, permissions,
+ * plans, features, templates) intact -- that is seeded by migration 0002 and is
+ * not tenant data.
+ *
+ * Discovered rather than listed: a hardcoded list silently stops covering tables
+ * added later, and a fixture that quietly leaves rows behind makes an isolation
+ * test pass for the wrong reason.
+ */
+const CATALOG_TABLES = [
+  'permissions',
+  'roles',
+  'role_permissions',
+  'plans',
+  'features',
+  'plan_features',
+  'automation_templates',
+  'website_templates',
+  'schema_migrations',
+];
+
 export async function truncateAll(owner: Client): Promise<void> {
-  await owner.query(
-    `TRUNCATE app.patients, app.clinic_users, app.platform_admins, app.clinics, app.organizations CASCADE`,
+  const res = await owner.query<{ relname: string }>(
+    `SELECT c.relname
+       FROM pg_class c
+       JOIN pg_namespace n ON n.oid = c.relnamespace
+      WHERE n.nspname = 'app' AND c.relkind = 'r'`,
   );
+  const targets = res.rows
+    .map((r) => r.relname)
+    .filter((t) => !CATALOG_TABLES.includes(t))
+    .map((t) => `app.${t}`);
+  if (targets.length > 0) {
+    await owner.query(`TRUNCATE ${targets.join(', ')} CASCADE`);
+  }
 }
