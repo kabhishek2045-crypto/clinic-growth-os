@@ -399,10 +399,10 @@ required before M2 proceeds. Two strategic challenges remain open by the user's 
 | Explicit, time-bounded, recorded elevation | done | `3fb19aa` |
 | Tagged-template query seam + import lint rule | done | `335d5b6` |
 | Composite-FK regression test | done | this commit |
-| Policies re-deriving membership from current_user_id | OPEN | eng finding 2 |
+| Policies re-deriving membership from current_user_id | done | migrations 0008 + 0009 |
 | Better Auth reconciliation spike | done | migration 0006 + src/lib/auth |
-| Connection-identity assertion in getPool() | OPEN | eng finding 4 |
-| 20 tables carry `clinic_id` with no FK to `clinics` | OPEN | eng finding 14 |
+| Connection-identity assertion in getPool() | done | `1673f4f` |
+| 20 tables carry `clinic_id` with no FK to `clinics` | done | migration 0007 |
 
 The `clinic_id` gap is a decision, not a fix: clinic is currently an operational
 scope rather than a security boundary, so `clinic_id` can hold any uuid including

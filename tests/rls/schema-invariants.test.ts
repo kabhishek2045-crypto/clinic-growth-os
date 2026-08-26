@@ -125,6 +125,36 @@ describe('cross-tenant references are unrepresentable', () => {
   });
 });
 
+describe('policies evaluate their predicates once per statement, not once per row', () => {
+  it('no policy calls a derivation function outside a scalar subquery', async () => {
+    // Since 0008 these functions query tables, so a per-row call is a table
+    // lookup per row. Measured on 50,000 patients: a bare call cost 2,057 ms for
+    // one count; wrapped in (SELECT ...) it is an InitPlan, evaluated once, and
+    // costs 25 ms. `= ANY (array)` cannot be an InitPlan at all, which is why the
+    // array membership is written IN (SELECT unnest(...)).
+    //
+    // A future policy written the obvious way would be correct and unusably slow,
+    // and nothing else would notice.
+    const res = await owner.query<{ tbl: string; polname: string; expr: string }>(
+      `SELECT c.relname AS tbl, p.polname,
+              COALESCE(pg_get_expr(p.polqual, p.polrelid), '') || ' ' ||
+              COALESCE(pg_get_expr(p.polwithcheck, p.polrelid), '') AS expr
+         FROM pg_policy p
+         JOIN pg_class c ON c.oid = p.polrelid
+         JOIN pg_namespace n ON n.oid = c.relnamespace
+        WHERE n.nspname = 'app'
+        ORDER BY c.relname, p.polname`,
+    );
+    const slow = res.rows.filter((r) => {
+      // A bare call is one not immediately preceded by "SELECT ".
+      const bareAdmin = /(?<!SELECT )app\.is_platform_admin\(\)/.test(r.expr);
+      const anyArray = /= ANY \(app\.current_org_ids\(\)\)/.test(r.expr);
+      return bareAdmin || anyArray;
+    });
+    expect(slow.map((r) => `${r.tbl}.${r.polname}`)).toEqual([]);
+  });
+});
+
 describe('clinic_id is constrained, not merely conventional', () => {
   it('every table carrying clinic_id references app.clinics', async () => {
     // Twenty tables carried clinic_id with no FK at all, so it could hold any
