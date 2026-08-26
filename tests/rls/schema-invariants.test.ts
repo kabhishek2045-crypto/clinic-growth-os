@@ -125,6 +125,44 @@ describe('cross-tenant references are unrepresentable', () => {
   });
 });
 
+describe('clinic_id is constrained, not merely conventional', () => {
+  it('every table carrying clinic_id references app.clinics', async () => {
+    // Twenty tables carried clinic_id with no FK at all, so it could hold any
+    // uuid including another organization's clinic. RLS never caught it because
+    // every policy keys on organization_id. Open decision 5 called multi-location
+    // UI "a flag flip"; it could not have been.
+    const res = await owner.query<{ relname: string }>(
+      `SELECT c.relname
+         FROM pg_class c
+         JOIN pg_namespace n ON n.oid = c.relnamespace
+         JOIN pg_attribute a ON a.attrelid = c.oid AND a.attname = 'clinic_id'
+                            AND NOT a.attisdropped
+        WHERE n.nspname = 'app' AND c.relkind = 'r'
+          AND NOT EXISTS (
+            SELECT 1 FROM pg_constraint fk
+              JOIN pg_class t ON t.oid = fk.confrelid
+             WHERE fk.conrelid = c.oid AND fk.contype = 'f' AND t.relname = 'clinics'
+          )
+        ORDER BY c.relname`,
+    );
+    expect(res.rows.map((r) => r.relname)).toEqual([]);
+  });
+
+  it('those references are composite, so a foreign clinic is unrepresentable', async () => {
+    const res = await owner.query<{ relname: string; conname: string }>(
+      `SELECT src.relname, con.conname
+         FROM pg_constraint con
+         JOIN pg_class src ON src.oid = con.conrelid
+         JOIN pg_class tgt ON tgt.oid = con.confrelid
+         JOIN pg_namespace n ON n.oid = src.relnamespace
+        WHERE n.nspname = 'app' AND con.contype = 'f' AND tgt.relname = 'clinics'
+          AND array_length(con.conkey, 1) < 2
+        ORDER BY src.relname`,
+    );
+    expect(res.rows.map((r) => `${r.relname}.${r.conname}`)).toEqual([]);
+  });
+});
+
 describe('RLS coverage holds as the schema grows', () => {
   it('every table in the app schema has RLS enabled AND forced', async () => {
     const res = await owner.query<{ relname: string }>(

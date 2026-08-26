@@ -458,3 +458,39 @@ describe('errors are loggable even when there is no tenant', () => {
     });
   });
 });
+
+describe('a clinic_id from another organization is unrepresentable', () => {
+  it("cannot stamp its own timeline event with another tenant's clinic", async () => {
+    // Before migration 0007 this succeeded: RLS accepted the row because
+    // organization_id was A's, and nothing constrained clinic_id at all.
+    await expect(
+      asUser(fx.userA, (c) =>
+        c.query(
+          `INSERT INTO app.patient_timeline_events
+             (organization_id, clinic_id, patient_id, event_type)
+           VALUES ($1, $2, $3, 'appointment_completed')`,
+          [fx.orgA, fx.clinicB, fx.patientA],
+        ),
+      ),
+    ).rejects.toThrow(/violates foreign key constraint/i);
+  });
+
+  it('still accepts its own clinic, and a null clinic for org-level rows', async () => {
+    const n = await asUser(fx.userA, async (c) => {
+      await c.query(
+        `INSERT INTO app.patient_timeline_events
+           (organization_id, clinic_id, patient_id, event_type)
+         VALUES ($1, $2, $3, 'appointment_completed')`,
+        [fx.orgA, fx.clinicA, fx.patientA],
+      );
+      await c.query(
+        `INSERT INTO app.patient_timeline_events
+           (organization_id, clinic_id, patient_id, event_type)
+         VALUES ($1, NULL, $2, 'lead_created')`,
+        [fx.orgA, fx.patientA],
+      );
+      return (await c.query('SELECT id FROM app.patient_timeline_events')).rows.length;
+    });
+    expect(n).toBe(2);
+  });
+});

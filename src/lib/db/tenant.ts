@@ -1,5 +1,5 @@
 import type { PoolClient } from 'pg';
-import { getPool } from './client';
+import { ensureConnectionIdentity, getPool } from './client';
 import { compile, type SqlQuery } from './sql';
 
 /**
@@ -48,6 +48,7 @@ export async function withTenant<T>(
   userId: string,
   fn: (tx: TenantQuery) => Promise<T>,
 ): Promise<T> {
+  await ensureConnectionIdentity();
   const client = await getPool().connect();
   let released = false;
   try {
@@ -113,6 +114,7 @@ export async function withPlatformAdmin<T>(
     throw new Error('withPlatformAdmin requires a reason for the audit trail');
   }
 
+  await ensureConnectionIdentity();
   const client = await getPool().connect();
   let released = false;
   try {
