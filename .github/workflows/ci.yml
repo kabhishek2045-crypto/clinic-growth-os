@@ -54,7 +54,7 @@ jobs:
       - name: No secret may reach the browser
         run: |
           npm run build
-          if grep -rlE 'BETTER_AUTH_SECRET|R2_SECRET_ACCESS_KEY|VERCEL_API_TOKEN|DATABASE_URL' .next/static 2>/dev/null; then
+          if grep -rlE 'BETTER_AUTH_SECRET|R2_SECRET_ACCESS_KEY|DOMAIN_PROVIDER_TOKEN|DATABASE_URL' .next/static 2>/dev/null; then
             echo "::error::A server secret was found in the client bundle"
             exit 1
           fi

@@ -30,9 +30,14 @@ const deferredSchema = z.object({
   R2_BUCKET_NAME: z.string().optional(), // M7
   BETTER_AUTH_SECRET: z.string().min(32).optional(), // M2
   BETTER_AUTH_URL: z.string().url().optional(), // M2
-  VERCEL_API_TOKEN: z.string().optional(), // M3
-  VERCEL_PROJECT_ID: z.string().optional(), // M3
-  VERCEL_TEAM_ID: z.string().optional(), // M3
+  // NOTE: MASTER_PROMPT §36 names these VERCEL_API_TOKEN / VERCEL_PROJECT_ID /
+  // VERCEL_TEAM_ID. Those names cannot be used: Vercel reserves the VERCEL_
+  // prefix for its own system variables and rejects any project variable that
+  // starts with it. Renamed by role rather than by vendor, which also suits §46
+  // better — a future DomainProvider that is not Vercel keeps the same names.
+  DOMAIN_PROVIDER_TOKEN: z.string().optional(), // M3
+  DOMAIN_PROVIDER_PROJECT_ID: z.string().optional(), // M3
+  DOMAIN_PROVIDER_TEAM_ID: z.string().optional(), // M3
 });
 
 const schema = serverSchema.merge(deferredSchema);
