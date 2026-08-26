@@ -1,0 +1,61 @@
+name: CI
+
+on:
+  push: { branches: [main] }
+  pull_request:
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+
+    # §47, §62.3 — the RLS suite runs against a real Postgres. The gate is the
+    # test suite, not the tool that wrote the code.
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: clinic_os
+        ports: ['5432:5432']
+        options: >-
+          --health-cmd pg_isready --health-interval 10s
+          --health-timeout 5s --health-retries 5
+
+    env:
+      DATABASE_URL_UNPOOLED: postgresql://postgres:postgres@localhost:5432/clinic_os
+      DATABASE_URL: postgresql://clinic_os_app:app_password@localhost:5432/clinic_os
+      PLATFORM_ROOT_DOMAIN: localhost:3000
+
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: 22, cache: npm }
+
+      - run: npm ci
+
+      - name: Apply migrations (as owner)
+        run: npm run db:migrate
+
+      - name: Give the app role a password so tests can connect as it
+        run: psql "$DATABASE_URL_UNPOOLED" -c "ALTER ROLE clinic_os_app LOGIN PASSWORD 'app_password'"
+
+      - name: TypeScript
+        run: npm run typecheck
+
+      - name: Lint
+        run: npm run lint
+
+      - name: Format
+        run: npm run format:check
+
+      - name: Tests, including tenant isolation
+        run: npm test
+
+      - name: No secret may reach the browser
+        run: |
+          npm run build
+          if grep -rlE 'BETTER_AUTH_SECRET|R2_SECRET_ACCESS_KEY|VERCEL_API_TOKEN|DATABASE_URL' .next/static 2>/dev/null; then
+            echo "::error::A server secret was found in the client bundle"
+            exit 1
+          fi
+          echo "clean"

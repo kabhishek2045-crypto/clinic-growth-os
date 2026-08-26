@@ -1,0 +1,11 @@
+.next
+node_modules
+coverage
+package-lock.json
+*.sql
+
+# Spec and AI-tool pointer files are authored prose, not build output.
+# Prettier must never rewrite them (MASTER_PROMPT §62.1: one canonical source).
+docs/
+CLAUDE.md
+AGENTS.md

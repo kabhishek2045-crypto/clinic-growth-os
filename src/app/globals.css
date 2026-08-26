@@ -1,0 +1,10 @@
+@import 'tailwindcss';
+
+/* §14 — clinic branding arrives as CSS custom properties only. Never injected
+   CSS, never injected JS. Defaults here are the platform's own, overridden
+   per-tenant in M3. */
+@theme {
+  --color-clinic-primary: #12539e;
+  --color-clinic-secondary: #0d3f7a;
+  --color-clinic-accent: #2f80ed;
+}
