@@ -322,9 +322,19 @@ never happened. Asking to elevate without an active grant raises rather than sil
 downgrading. `withPlatformAdmin` was rewritten to use it and the tests now call the real
 production functions instead of a mirror. Mutation-verified against four defects.
 
-STILL REQUIRED: the query seam must become a tagged template so a raw SQL string is a
-type error, before M2-M13 write hundreds of queries against `query(text)`. The GUCs
-remain forgeable by anything that can execute arbitrary SQL.
+RESOLVED: `TenantQuery.query()` now accepts only a `SqlQuery` built by the `sql` tag
+(`src/lib/db/sql.ts`), so a raw string does not type-check. Interpolations become bind
+parameters; identifiers are the one place a value reaches statement text and are
+validated against `/^[a-z_][a-z0-9_]*$/` and rejected rather than escaped. The
+`no-restricted-imports` rule that `tenant.ts` previously *claimed* existed now does,
+banning pool access outside `src/lib/db`. 17 unit tests cover injection payloads,
+composition and identifier refusal.
+
+Residual risk, stated honestly: this closes the application-code path to GUC forgery. It
+does not make the GUCs unforgeable — Postgres has no ACL on custom settings, so anything
+that can execute arbitrary SQL by some other route can still set them. Eng finding #2's
+stronger fix (policies re-deriving membership from `app.current_user_id()` rather than
+trusting a pre-computed array) remains open.
 
 ## Decision Audit Trail (continued)
 

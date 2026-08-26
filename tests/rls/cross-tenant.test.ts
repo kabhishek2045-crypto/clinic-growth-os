@@ -2,6 +2,7 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import type { Client, Pool, PoolClient } from 'pg';
 import { appPool, ownerClient, seed, truncateAll, type Fixture } from '../helpers/db';
 import { withPlatformAdmin, withTenant } from '@/lib/db/tenant';
+import { sql } from '@/lib/db/sql';
 import { closePool } from '@/lib/db/client';
 
 /**
@@ -282,7 +283,7 @@ describe('platform administration is separate and explicit', () => {
 
   it('an admin using the ordinary door gets their OWN tenants only', async () => {
     const rows = await withTenant(fx.adminUser, async (tx) => {
-      const r = await tx.query<{ id: string }>('SELECT id FROM app.patients');
+      const r = await tx.query<{ id: string }>(sql`SELECT id FROM app.patients`);
       return r.rows.map((x) => x.id);
     });
     // adminUser is a member of no clinic, so unelevated they see nothing at all.
@@ -291,7 +292,7 @@ describe('platform administration is separate and explicit', () => {
 
   it('crossing tenants requires withPlatformAdmin', async () => {
     const rows = await withPlatformAdmin(fx.adminUser, 'support ticket 4711', async (tx) => {
-      const r = await tx.query<{ id: string }>('SELECT id FROM app.patients');
+      const r = await tx.query<{ id: string }>(sql`SELECT id FROM app.patients`);
       return r.rows.map((x) => x.id);
     });
     expect([...rows].sort()).toEqual([fx.patientA, fx.patientA2, fx.patientB].sort());
@@ -299,7 +300,7 @@ describe('platform administration is separate and explicit', () => {
 
   it('the elevation is recorded, with its reason, before anything is read', async () => {
     await withPlatformAdmin(fx.adminUser, 'investigating duplicate invoice', async (tx) => {
-      await tx.query('SELECT id FROM app.patients');
+      await tx.query(sql`SELECT id FROM app.patients`);
     });
     const ev = await owner.query<{ payload: { admin_user_id: string; reason: string } }>(
       `SELECT payload FROM app.system_events
@@ -316,7 +317,7 @@ describe('platform administration is separate and explicit', () => {
     );
     await expect(
       withPlatformAdmin(fx.adminUser, 'will fail', async (tx) => {
-        await tx.query('SELECT id FROM app.patients');
+        await tx.query(sql`SELECT id FROM app.patients`);
         throw new Error('deliberate');
       }),
     ).rejects.toThrow('deliberate');
@@ -331,7 +332,7 @@ describe('platform administration is separate and explicit', () => {
     // data is missing rather than that it lacked permission.
     await expect(
       withPlatformAdmin(fx.userA, 'trying it on', async (tx) => {
-        await tx.query('SELECT 1');
+        await tx.query(sql`SELECT 1`);
       }),
     ).rejects.toThrow(/not an active platform admin/i);
   });
@@ -344,7 +345,7 @@ describe('platform administration is separate and explicit', () => {
     try {
       await expect(
         withPlatformAdmin(fx.adminUser, 'after hours', async (tx) => {
-          await tx.query('SELECT 1');
+          await tx.query(sql`SELECT 1`);
         }),
       ).rejects.toThrow(/not an active platform admin/i);
     } finally {
@@ -357,7 +358,7 @@ describe('platform administration is separate and explicit', () => {
   it('withPlatformAdmin still refuses an empty reason', async () => {
     await expect(
       withPlatformAdmin(fx.adminUser, '   ', async (tx) => {
-        await tx.query('SELECT 1');
+        await tx.query(sql`SELECT 1`);
       }),
     ).rejects.toThrow(/requires a reason/i);
   });

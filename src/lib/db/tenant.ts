@@ -1,5 +1,6 @@
 import type { PoolClient } from 'pg';
 import { getPool } from './client';
+import { compile, type SqlQuery } from './sql';
 
 /**
  * MASTER_PROMPT §8, §9.1 — the ONLY door to tenant-scoped data.
@@ -7,21 +8,28 @@ import { getPool } from './client';
  * No service, action, or route handler may take a connection from the pool
  * directly. If a query runs outside withTenant() it runs without RLS context,
  * and because the helpers in migration 0001 fail closed it will silently return
- * nothing rather than leaking — but it is still a bug, and the ESLint rule in
- * eslint.config.mjs plus code review are what keep it from happening.
+ * nothing rather than leaking — but it is still a bug. The `no-restricted-imports`
+ * rule in eslint.config.mjs makes importing the pool outside this directory a
+ * lint error; that rule was added after a review found this comment claiming a
+ * control that did not exist.
  */
 
 export interface TenantQuery {
+  /**
+   * Accepts only a SqlQuery built by the `sql` tag. A plain string does not
+   * type-check, which is the point: raw-string interpolation was the mitigation
+   * the §9.1 comment claimed and the interface simultaneously invited.
+   */
   query<R extends Record<string, unknown> = Record<string, unknown>>(
-    text: string,
-    values?: readonly unknown[],
+    query: SqlQuery,
   ): Promise<{ rows: R[]; rowCount: number }>;
 }
 
 function wrap(client: PoolClient): TenantQuery {
   return {
-    async query(text, values) {
-      const res = await client.query(text, values ? [...values] : undefined);
+    async query(query) {
+      const { text, values } = compile(query);
+      const res = await client.query(text, values);
       return { rows: res.rows, rowCount: res.rowCount ?? 0 };
     },
   };
