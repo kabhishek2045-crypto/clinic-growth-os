@@ -272,17 +272,27 @@ describe('double booking is prevented by the database, not by application checks
         [fx.orgA, fx.clinicA, fx.patientA, fx.doctorA, slot, slotEnd],
       );
 
-      // Deliberately NOT awaited: this blocks on A's lock until A resolves.
-      const bInsert = b.query(
-        `INSERT INTO app.appointments
-           (organization_id, clinic_id, patient_id, doctor_id, starts_at, ends_at, status)
-         VALUES ($1, $2, $3, $4, $5, $6, 'booked')`,
-        [fx.orgA, fx.clinicA, fx.patientA2, fx.doctorA, '2026-09-01T10:15:00+05:30', slotEnd],
-      );
+      // Deliberately NOT awaited here: this blocks on A's lock until A resolves.
+      // A rejection handler is attached IMMEDIATELY, though — without one the
+      // rejection is briefly unhandled between creation and assertion, which
+      // vitest 4 correctly fails the run for.
+      const bSettled = b
+        .query(
+          `INSERT INTO app.appointments
+             (organization_id, clinic_id, patient_id, doctor_id, starts_at, ends_at, status)
+           VALUES ($1, $2, $3, $4, $5, $6, 'booked')`,
+          [fx.orgA, fx.clinicA, fx.patientA2, fx.doctorA, '2026-09-01T10:15:00+05:30', slotEnd],
+        )
+        .then(
+          () => null,
+          (e: unknown) => e,
+        );
 
       await a.query('COMMIT');
 
-      await expect(bInsert).rejects.toThrow(
+      const rejection = await bSettled;
+      expect(rejection).not.toBeNull();
+      expect(String(rejection)).toMatch(
         /appointments_no_double_booking|conflicting key|exclusion/i,
       );
       await b.query('ROLLBACK');

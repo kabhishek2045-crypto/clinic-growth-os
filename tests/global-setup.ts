@@ -31,6 +31,12 @@ const APP_PASSWORD = 'app_password_local_only';
 
 export async function setup(): Promise<void> {
   if (process.env.DATABASE_URL && process.env.DATABASE_URL_UNPOOLED) {
+    if (!process.env.DATABASE_URL_AUTH) {
+      throw new Error(
+        'DATABASE_URL_AUTH is required alongside DATABASE_URL: since migration 0006 the ' +
+          'auth tables are reachable only by clinic_os_auth, and fixtures need it.',
+      );
+    }
     const host = new URL(process.env.DATABASE_URL).host;
     console.log(`[rls] using the configured database at ${host}`);
     return;
@@ -81,10 +87,14 @@ export async function setup(): Promise<void> {
   // The migration creates clinic_os_app NOLOGIN. Tests must actually connect as
   // it, so grant it a login here — local and ephemeral, never in production.
   await owner.query(`ALTER ROLE clinic_os_app LOGIN PASSWORD '${APP_PASSWORD}'`);
+  // Same for the auth role. Better Auth's tables are unreachable to every other
+  // role by design (migration 0006), so fixtures need this connection.
+  await owner.query(`ALTER ROLE clinic_os_auth LOGIN PASSWORD '${APP_PASSWORD}'`);
   await owner.end();
 
   process.env.DATABASE_URL_UNPOOLED = ownerUrl;
   process.env.DATABASE_URL = appUrl;
+  process.env.DATABASE_URL_AUTH = `postgresql://clinic_os_auth:${APP_PASSWORD}@localhost:${port}/clinic_os`;
   console.log(`[rls] postgres ready on :${port}`);
 }
 

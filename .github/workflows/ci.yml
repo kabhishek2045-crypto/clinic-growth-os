@@ -24,6 +24,7 @@ jobs:
     env:
       DATABASE_URL_UNPOOLED: postgresql://postgres:postgres@localhost:5432/clinic_os
       DATABASE_URL: postgresql://clinic_os_app:app_password@localhost:5432/clinic_os
+      DATABASE_URL_AUTH: postgresql://clinic_os_auth:auth_password@localhost:5432/clinic_os
       PLATFORM_ROOT_DOMAIN: localhost:3000
       # Distinctive fixture VALUES. The bundle check below greps for these, not
       # for the variable names — see that step for why.
@@ -41,8 +42,10 @@ jobs:
       - name: Apply migrations (as owner)
         run: npm run db:migrate
 
-      - name: Give the app role a password so tests can connect as it
-        run: psql "$DATABASE_URL_UNPOOLED" -c "ALTER ROLE clinic_os_app LOGIN PASSWORD 'app_password'"
+      - name: Give the app and auth roles passwords so tests can connect as them
+        run: |
+          psql "$DATABASE_URL_UNPOOLED" -c "ALTER ROLE clinic_os_app  LOGIN PASSWORD 'app_password'"
+          psql "$DATABASE_URL_UNPOOLED" -c "ALTER ROLE clinic_os_auth LOGIN PASSWORD 'auth_password'"
 
       - name: TypeScript
         run: npm run typecheck

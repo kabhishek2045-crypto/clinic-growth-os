@@ -31,6 +31,35 @@ export function appPool(): Pool {
   return new Pool({ connectionString: requireUrls().appUrl, max: 4 });
 }
 
+/**
+ * Better Auth's tables are FORCE RLS with a policy naming only clinic_os_auth,
+ * so even the owner cannot read or seed them. That is the point — but it means
+ * fixtures need this connection to create the user rows that clinic_users and
+ * platform_admins now reference.
+ */
+export function authClient(): Client {
+  const url = process.env.DATABASE_URL_AUTH;
+  if (!url) {
+    throw new Error(
+      'Set DATABASE_URL_AUTH (role clinic_os_auth) — the auth tables are unreachable ' +
+        'to every other role by design. See migrations/0006_better_auth.sql.',
+    );
+  }
+  return new Client({ connectionString: url });
+}
+
+/** Creates a Better Auth user row and returns its uuid. */
+export async function createAuthUser(auth: Client, email: string, name: string): Promise<string> {
+  const res = await auth.query<{ id: string }>(
+    `INSERT INTO app."user" ("id", "name", "email", "emailVerified")
+     VALUES (gen_random_uuid(), $1, $2, true) RETURNING "id"`,
+    [name, email],
+  );
+  const id = res.rows[0]?.id;
+  if (!id) throw new Error('createAuthUser returned no id');
+  return id;
+}
+
 export interface Fixture {
   orgA: string;
   clinicA: string;
@@ -76,10 +105,24 @@ export async function seed(owner: Client): Promise<Fixture> {
     [orgB],
   );
 
-  const userA = crypto.randomUUID();
-  const userB = crypto.randomUUID();
-  const adminUser = crypto.randomUUID();
-  const strangerUser = crypto.randomUUID(); // authenticated, but member of nothing
+  // Real Better Auth rows: clinic_users.user_id and platform_admins.user_id
+  // carry foreign keys to app."user" since migration 0006.
+  const auth = authClient();
+  await auth.connect();
+  let userA: string, userB: string, adminUser: string, strangerUser: string;
+  try {
+    userA = await createAuthUser(auth, `a-${Date.now()}@abc.example.com`, 'Owner A');
+    userB = await createAuthUser(auth, `b-${Date.now()}@xyz.example.com`, 'Owner B');
+    adminUser = await createAuthUser(
+      auth,
+      `admin-${Date.now()}@platform.example.com`,
+      'Platform Admin',
+    );
+    // Authenticated, but a member of nothing.
+    strangerUser = await createAuthUser(auth, `s-${Date.now()}@nowhere.example.com`, 'Stranger');
+  } finally {
+    await auth.end();
+  }
 
   await owner.query(
     `INSERT INTO app.clinic_users (user_id, organization_id, clinic_id, role)

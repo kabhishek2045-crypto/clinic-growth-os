@@ -400,7 +400,7 @@ required before M2 proceeds. Two strategic challenges remain open by the user's 
 | Tagged-template query seam + import lint rule | done | `335d5b6` |
 | Composite-FK regression test | done | this commit |
 | Policies re-deriving membership from current_user_id | OPEN | eng finding 2 |
-| Better Auth reconciliation spike (uuid vs string ids, schema, DDL) | OPEN | eng finding 10, M2 blocker |
+| Better Auth reconciliation spike | done | migration 0006 + src/lib/auth |
 | Connection-identity assertion in getPool() | OPEN | eng finding 4 |
 | 20 tables carry `clinic_id` with no FK to `clinics` | OPEN | eng finding 14 |
 
@@ -410,3 +410,26 @@ another organization's clinic. Open decision 5 (multi-location UI) cannot be a
 flag flip until either the composite `(organization_id, clinic_id)` references are
 added to those 20 tables while they are still empty, or `app.current_clinic_ids()`
 is deleted and the operational-only status documented loudly.
+
+### Better Auth spike result (migration 0006)
+
+Four collisions, each verified empirically against version 1.7.1 rather than assumed:
+
+| Collision | Evidence | Resolution |
+|---|---|---|
+| ids are `text`, not `uuid` | `"user"."id" text not null primary key` | `advanced.database.generateId` returns a uuid; columns declared uuid |
+| lands in `public`, not `app` | `public.user`, `public.session`, ... | pool connects with `-c search_path=app`; verified zero leak |
+| migrator needs DDL | app role: `permission denied for schema public` | DDL owned by migration 0006, run as owner |
+| ships with no RLS | `rowsecurity=false` on all four | see below |
+| **new:** peer conflict | `@tanstack/react-start` wants vite >= 7 | vitest 2 -> 4, drizzle 0.38/0.30 -> 0.45/0.31 |
+
+The RLS fix is a ROLE, not a policy, and the spike is why: Better Auth reads `user` by
+email and `session` by token BEFORE any principal exists, exactly like domain resolution,
+so a principal-keyed policy would deadlock sign-in. A dedicated `clinic_os_auth` role
+reaches those four tables and nothing else; `clinic_os_app` has no grant at all. Even
+total SQL injection in the tenant path cannot read a session token or a password hash.
+
+`clinic_users.user_id` and `platform_admins.user_id` now carry foreign keys to
+`app."user"`. Applying 0006 to a populated database needs the NOT VALID -> backfill ->
+VALIDATE sequence documented in the migration; it failed on first run against dev data
+holding fixture rows, which is decision 16's two-deploy case arriving on schedule.
