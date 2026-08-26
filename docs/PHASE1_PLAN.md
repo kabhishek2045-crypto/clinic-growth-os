@@ -314,11 +314,17 @@ have fired for an anonymous visitor. `app.resolve_domain()` handles the pre-auth
 case and closes the enumeration oracle on `clinic_domains.normalized_domain`. Covered by
 25 tests, mutation-verified. M3 is unblocked.
 
-Also required in M2: elevation must become explicit
-(`set_tenant_context(p_user_id, p_elevate boolean DEFAULT false)`), `withPlatformAdmin`
-must write `audit_logs.impersonation_reason` in the same transaction, and the query seam
-must become a tagged template so a raw SQL string is a type error before M2-M13 write
-hundreds of queries against `query(text)`.
+RESOLVED in migration 0005: elevation is now explicit
+(`set_tenant_context(p_user_id, p_elevate boolean DEFAULT false)`), time-bounded via
+`platform_admins.expires_at`, and recorded by `app.begin_elevation()` in the same
+transaction as the work — so a rolled-back elevation leaves no record of access that
+never happened. Asking to elevate without an active grant raises rather than silently
+downgrading. `withPlatformAdmin` was rewritten to use it and the tests now call the real
+production functions instead of a mirror. Mutation-verified against four defects.
+
+STILL REQUIRED: the query seam must become a tagged template so a raw SQL string is a
+type error, before M2-M13 write hundreds of queries against `query(text)`. The GUCs
+remain forgeable by anything that can execute arbitrary SQL.
 
 ## Decision Audit Trail (continued)
 

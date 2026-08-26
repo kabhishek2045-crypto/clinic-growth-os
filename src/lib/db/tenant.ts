@@ -81,9 +81,18 @@ export async function withTenant<T>(
 }
 
 /**
- * Privileged path for platform administration and background jobs (§39, §26).
- * Deliberately separate and deliberately noisy: it takes an explicit reason that
- * the audit log records, so "why did this bypass a tenant?" always has an answer.
+ * Privileged path for platform administration (§39).
+ *
+ * Elevation is a deliberate act. Calling withTenant() as a platform admin gets
+ * you your OWN tenants and nothing more — crossing a tenant boundary requires
+ * coming through here, and coming through here is recorded before any elevated
+ * statement runs.
+ *
+ * This function used to validate `reason` and then throw it away, so the audit
+ * trail it claimed to feed never existed. It now writes the elevation record
+ * inside the same transaction as the work, which means two things: an elevation
+ * that rolls back leaves no record of access that never happened, and one that
+ * commits cannot have read anything before the record was written.
  *
  * §53: never use this for ordinary clinic operations.
  */
@@ -95,5 +104,29 @@ export async function withPlatformAdmin<T>(
   if (!reason.trim()) {
     throw new Error('withPlatformAdmin requires a reason for the audit trail');
   }
-  return withTenant(adminUserId, fn);
+
+  const client = await getPool().connect();
+  let released = false;
+  try {
+    await client.query('BEGIN');
+    await client.query('SELECT app.set_tenant_context($1, true)', [adminUserId]);
+    await client.query('SELECT app.begin_elevation($1)', [reason]);
+    const result = await fn(wrap(client));
+    await client.query('COMMIT');
+    return result;
+  } catch (error) {
+    let rollbackFailed = false;
+    try {
+      await client.query('ROLLBACK');
+    } catch {
+      rollbackFailed = true;
+    }
+    if (rollbackFailed) {
+      client.release(error instanceof Error ? error : new Error(String(error)));
+      released = true;
+    }
+    throw error;
+  } finally {
+    if (!released) client.release();
+  }
 }
