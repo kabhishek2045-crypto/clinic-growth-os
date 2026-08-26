@@ -4,6 +4,13 @@ import { join } from 'node:path';
 import { readFile } from 'node:fs/promises';
 import EmbeddedPostgres from 'embedded-postgres';
 import { Client } from 'pg';
+import { config as loadEnv } from 'dotenv';
+
+// globalSetup runs before setupFiles, and dotenv's default entrypoint only reads
+// `.env`. Load `.env.local` here explicitly, or a configured Neon connection is
+// silently ignored and the suite quietly falls back to the embedded server.
+loadEnv({ path: '.env.local', quiet: true });
+loadEnv({ quiet: true });
 
 /**
  * §47, §62.3 — the acceptance gate is the test suite, and it must be runnable by
@@ -25,8 +32,19 @@ const APP_PASSWORD = 'app_password_local_only';
 
 export async function setup(): Promise<void> {
   if (process.env.DATABASE_URL && process.env.DATABASE_URL_UNPOOLED) {
-    console.log('[rls] using the configured DATABASE_URL');
+    const host = new URL(process.env.DATABASE_URL).host;
+    console.log(`[rls] using the configured database at ${host}`);
     return;
+  }
+
+  // One of the two set is always a mistake -- almost certainly a half-configured
+  // .env.local -- and falling back to the embedded server would hide it.
+  if (process.env.DATABASE_URL || process.env.DATABASE_URL_UNPOOLED) {
+    throw new Error(
+      'Set BOTH DATABASE_URL and DATABASE_URL_UNPOOLED, or neither. ' +
+        'Only one is set, which would silently run the isolation suite against ' +
+        'the embedded server instead of the database you configured.',
+    );
   }
 
   dataDir = await mkdtemp(join(tmpdir(), 'clinic-os-pg-'));

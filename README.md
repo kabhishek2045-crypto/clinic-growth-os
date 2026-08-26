@@ -48,6 +48,22 @@ passes. `clinic_os_app` owns nothing, has no `BYPASSRLS`, and cannot run DDL; ev
 additionally set `FORCE ROW LEVEL SECURITY`. Two independent defences, because one is not enough for
 the boundary the whole product's security rests on.
 
+## Pointing at Neon
+
+The app role is created by `migrations/0001_tenancy_spike.sql` as `NOLOGIN`. Give it a password
+once, as the owner, after the first migration:
+
+```sql
+ALTER ROLE clinic_os_app LOGIN PASSWORD '<generated>';
+```
+
+**Create it in SQL, never through Neon's API or console.** A role created through Neon's control
+plane is granted `neon_superuser`, which can reach `BYPASSRLS` — every policy in this repo would
+stop applying, and the app would keep working, which is the worst possible failure shape. The suite
+asserts this explicitly (`cannot REACH a role that has BYPASSRLS or SUPERUSER`).
+
+Point `DATABASE_URL` at the **pooled** endpoint and `DATABASE_URL_UNPOOLED` at the direct one.
+
 ## Running the RLS suite
 
 ```bash

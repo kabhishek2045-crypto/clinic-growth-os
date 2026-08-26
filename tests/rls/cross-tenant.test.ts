@@ -69,6 +69,21 @@ describe('the app role cannot escape RLS', () => {
     expect(res.rows[0]?.rolsuper).toBe(false);
   });
 
+  it('cannot REACH a role that has BYPASSRLS or SUPERUSER', async () => {
+    // Specifically a Neon hazard. A role created through Neon's API or console is
+    // granted neon_superuser; one created in SQL, as migration 0001 does, is not.
+    // Checking the role's own attributes would not catch the difference, because
+    // the escalation would come through membership rather than the attribute --
+    // so check every role reachable via pg_has_role instead.
+    const res = await owner.query<{ rolname: string }>(
+      `SELECT r.rolname
+         FROM pg_roles r
+        WHERE pg_has_role('clinic_os_app', r.oid, 'USAGE')
+          AND (r.rolbypassrls OR r.rolsuper)`,
+    );
+    expect(res.rows.map((r) => r.rolname)).toEqual([]);
+  });
+
   it('has RLS both ENABLED and FORCED on every tenant table', async () => {
     const res = await owner.query<{
       relname: string;
