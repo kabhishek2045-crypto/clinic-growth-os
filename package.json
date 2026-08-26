@@ -19,7 +19,8 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "test:rls": "vitest run tests/rls",
-    "verify": "npm run typecheck && npm run lint && npm run format:check && npm run test"
+    "verify": "npm run deps:check && npm run typecheck && npm run lint && npm run format:check && npm run test",
+    "deps:check": "npm ci --dry-run --no-audit --no-fund"
   },
   "dependencies": {
     "better-auth": "1.7.1",
