@@ -306,9 +306,13 @@ anonymous, system, or patient principal. Consequences, by milestone:
 - **M12** patients appear in no `clinic_users` row -> a patient session sees nothing.
   `app.current_user_id()` is referenced by no policy.
 
-REQUIRED BEFORE M2: design `app.set_public_context(p_org_id)` and
-`app.set_patient_context(p_patient_id)`, plus explicit `FOR SELECT` policies naming the
-small public-readable set, and per-patient policies keyed on `app.current_patient_id()`.
+RESOLVED in migration 0004. Three mutually exclusive principals now exist, each keyed on
+its own GUC: staff (`app.current_org_ids`), public (`app.current_public_org_id`) and
+patient (`app.current_patient_id`). The separation is the security property — had
+`set_public_context` populated `current_org_ids`, every existing `_tenant` policy would
+have fired for an anonymous visitor. `app.resolve_domain()` handles the pre-authentication
+case and closes the enumeration oracle on `clinic_domains.normalized_domain`. Covered by
+25 tests, mutation-verified. M3 is unblocked.
 
 Also required in M2: elevation must become explicit
 (`set_tenant_context(p_user_id, p_elevate boolean DEFAULT false)`), `withPlatformAdmin`

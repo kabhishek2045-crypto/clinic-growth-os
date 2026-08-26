@@ -39,6 +39,7 @@ export interface Fixture {
   patientA2: string;
   householdA: string;
   conditionA: string;
+  conditionA2: string;
   doctorA: string;
   orgB: string;
   clinicB: string;
@@ -145,6 +146,17 @@ export async function seed(owner: Client): Promise<Fixture> {
     [orgA],
   );
 
+  // A SECOND patient in the SAME organization, with their own clinical record.
+  // Without this, "a patient sees one condition" is true whether the policy
+  // scopes by patient or merely by organization -- a mutation dropping the
+  // patient_id predicate passed the whole suite until this row existed.
+  const conditionA2 = await one(
+    `INSERT INTO app.health_conditions
+       (organization_id, clinic_id, patient_id, condition_code, display_name, status)
+     VALUES ($1, $2, $3, 'J06', 'Acute upper respiratory infection', 'resolved') RETURNING id`,
+    [orgA, clinicA, patientA2],
+  );
+
   return {
     orgA,
     clinicA,
@@ -153,6 +165,7 @@ export async function seed(owner: Client): Promise<Fixture> {
     patientA2,
     householdA,
     conditionA,
+    conditionA2,
     doctorA,
     orgB,
     clinicB,
