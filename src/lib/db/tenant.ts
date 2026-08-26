@@ -41,6 +41,7 @@ export async function withTenant<T>(
   fn: (tx: TenantQuery) => Promise<T>,
 ): Promise<T> {
   const client = await getPool().connect();
+  let released = false;
   try {
     await client.query('BEGIN');
     // SET LOCAL semantics via set_config(..., is_local => true) inside the
@@ -51,13 +52,31 @@ export async function withTenant<T>(
     await client.query('COMMIT');
     return result;
   } catch (error) {
-    await client.query('ROLLBACK').catch(() => undefined);
+    // If ROLLBACK itself fails the connection is left in an aborted transaction.
+    // Returning it to the pool poisons every subsequent tenant that picks it up,
+    // and the symptom ("current transaction is aborted") surfaces far from the
+    // cause. release(err) destroys it instead.
+    let rollbackFailed = false;
+    try {
+      await client.query('ROLLBACK');
+    } catch {
+      rollbackFailed = true;
+    }
+    if (rollbackFailed) {
+      client.release(error instanceof Error ? error : new Error(String(error)));
+      released = true;
+    }
     throw error;
   } finally {
-    // Belt and braces: ROLLBACK/COMMIT already discards SET LOCAL, but an
-    // explicit scrub means a leak needs two independent failures, not one.
-    await client.query('SELECT app.clear_tenant_context()').catch(() => undefined);
-    client.release();
+    // COMMIT and ROLLBACK discard SET LOCAL. That is the whole mechanism, and it
+    // is sufficient.
+    //
+    // There used to be a clear_tenant_context() call here, described as "belt and
+    // braces". It ran after COMMIT, outside any transaction, where
+    // set_config(..., is_local => true) reverts at the end of the statement -- so
+    // it did nothing except cost a round trip while reading like a second line of
+    // defence. Removed in migration 0003.
+    if (!released) client.release();
   }
 }
 
