@@ -1,5 +1,9 @@
 import type { Metadata } from 'next';
 import './globals.css';
+import { Geist } from 'next/font/google';
+import { cn } from '@/lib/utils';
+
+const geist = Geist({ subsets: ['latin'], variable: '--font-sans' });
 
 // §14 — per-tenant metadata, title, and favicon replace these in M3, resolved
 // from the verified request host rather than anything the client sends.
@@ -10,7 +14,7 @@ export const metadata: Metadata = {
 
 export default function RootLayout({ children }: { children: React.ReactNode }) {
   return (
-    <html lang="en">
+    <html lang="en" className={cn('font-sans', 'font-sans', geist.variable)}>
       <body className="bg-white text-slate-900 antialiased">{children}</body>
     </html>
   );
