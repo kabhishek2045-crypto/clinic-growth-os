@@ -24,7 +24,13 @@ jobs:
     env:
       DATABASE_URL_UNPOOLED: postgresql://postgres:postgres@localhost:5432/clinic_os
       DATABASE_URL: postgresql://clinic_os_app:app_password@localhost:5432/clinic_os
+      DATABASE_URL_AUTH: postgresql://clinic_os_auth:auth_password@localhost:5432/clinic_os
       PLATFORM_ROOT_DOMAIN: localhost:3000
+      # Distinctive fixture VALUES. The bundle check below greps for these, not
+      # for the variable names — see that step for why.
+      BETTER_AUTH_SECRET: ci-fixture-zQ7mVx2LpR8kNw4TgYb6HsJd3FaCeUn9
+      R2_SECRET_ACCESS_KEY: ci-fixture-r2-Xk91PmTv48LqZo2RwYc7BnHu5DsEg3
+      DOMAIN_PROVIDER_TOKEN: ci-fixture-dom-Vb63NqLz09XtRmKp7WyGc4JhAe2Sd8
 
     steps:
       - uses: actions/checkout@v4
@@ -36,8 +42,10 @@ jobs:
       - name: Apply migrations (as owner)
         run: npm run db:migrate
 
-      - name: Give the app role a password so tests can connect as it
-        run: psql "$DATABASE_URL_UNPOOLED" -c "ALTER ROLE clinic_os_app LOGIN PASSWORD 'app_password'"
+      - name: Give the app and auth roles passwords so tests can connect as them
+        run: |
+          psql "$DATABASE_URL_UNPOOLED" -c "ALTER ROLE clinic_os_app  LOGIN PASSWORD 'app_password'"
+          psql "$DATABASE_URL_UNPOOLED" -c "ALTER ROLE clinic_os_auth LOGIN PASSWORD 'auth_password'"
 
       - name: TypeScript
         run: npm run typecheck
@@ -54,8 +62,44 @@ jobs:
       - name: No secret may reach the browser
         run: |
           npm run build
-          if grep -rlE 'BETTER_AUTH_SECRET|R2_SECRET_ACCESS_KEY|DOMAIN_PROVIDER_TOKEN|DATABASE_URL' .next/static 2>/dev/null; then
-            echo "::error::A server secret was found in the client bundle"
+          # Grep for the VALUES, never the names.
+          #
+          # This check previously grepped .next/static for the strings
+          # "BETTER_AUTH_SECRET", "DATABASE_URL" and so on. That can never fire:
+          # bundlers inline process.env.X by substituting the VALUE and deleting
+          # the name, so the one artefact a real leak leaves behind is the only
+          # thing the old pattern could not match. It reported "clean" on every
+          # run while being structurally incapable of detecting a leak.
+          #
+          # The fixture values above are distinctive enough that a match is a
+          # leak, not a coincidence.
+          leaked=0
+          for pair in \
+            "BETTER_AUTH_SECRET=$BETTER_AUTH_SECRET" \
+            "R2_SECRET_ACCESS_KEY=$R2_SECRET_ACCESS_KEY" \
+            "DOMAIN_PROVIDER_TOKEN=$DOMAIN_PROVIDER_TOKEN" \
+            "DATABASE_URL=$DATABASE_URL"; do
+            name="${pair%%=*}"; value="${pair#*=}"
+            if [ -n "$value" ] && grep -rlF -- "$value" .next/static 2>/dev/null; then
+              echo "::error::$name leaked into the client bundle"
+              leaked=1
+            fi
+          done
+          [ "$leaked" -eq 0 ] || exit 1
+          echo "no server secret value found in .next/static"
+
+      - name: The leak check must actually be able to fail
+        run: |
+          # A canary. If the detector cannot catch a secret that is definitely
+          # present, it is not a detector. This is what the old check would have
+          # failed, and what kept it passing for three commits.
+          mkdir -p .next/static/__canary
+          printf 'const s=%s;\n' "\"$BETTER_AUTH_SECRET\"" > .next/static/__canary/leak.js
+          if grep -rlF -- "$BETTER_AUTH_SECRET" .next/static >/dev/null 2>&1; then
+            echo "canary detected — the leak check works"
+            rm -rf .next/static/__canary
+          else
+            echo "::error::canary NOT detected — the secret check is broken"
+            rm -rf .next/static/__canary
             exit 1
           fi
-          echo "clean"

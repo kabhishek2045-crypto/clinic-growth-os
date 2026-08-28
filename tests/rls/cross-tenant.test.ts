@@ -1,6 +1,9 @@
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import type { Client, Pool, PoolClient } from 'pg';
 import { appPool, ownerClient, seed, truncateAll, type Fixture } from '../helpers/db';
+import { withPlatformAdmin, withTenant } from '@/lib/db/tenant';
+import { sql } from '@/lib/db/sql';
+import { closePool } from '@/lib/db/client';
 
 /**
  * MASTER_PROMPT §47 — "Automated tests MUST attempt cross-tenant access and prove
@@ -49,6 +52,7 @@ beforeAll(async () => {
 });
 
 afterAll(async () => {
+  await closePool();
   await pool?.end();
   await owner?.end();
 });
@@ -268,12 +272,95 @@ describe('context does not survive the connection', () => {
 });
 
 describe('platform administration is separate and explicit', () => {
-  it('a platform admin can cross tenants', async () => {
-    const rows = await asUser(fx.adminUser, async (c) => {
-      const r = await c.query<{ id: string }>('SELECT id FROM app.patients');
+  // This block previously asserted the OPPOSITE: that a platform admin coming
+  // through the ordinary door crossed every tenant. That was the defect, not the
+  // feature, and the heading made it read like a control. Elevation is now
+  // something you ask for (migration 0005).
+  //
+  // These tests call the REAL withTenant/withPlatformAdmin rather than the
+  // asUser() mirror above, because the mirror proves things about the migrations
+  // and nothing about the code that ships.
+
+  it('an admin using the ordinary door gets their OWN tenants only', async () => {
+    const rows = await withTenant(fx.adminUser, async (tx) => {
+      const r = await tx.query<{ id: string }>(sql`SELECT id FROM app.patients`);
+      return r.rows.map((x) => x.id);
+    });
+    // adminUser is a member of no clinic, so unelevated they see nothing at all.
+    expect(rows).toEqual([]);
+  });
+
+  it('crossing tenants requires withPlatformAdmin', async () => {
+    const rows = await withPlatformAdmin(fx.adminUser, 'support ticket 4711', async (tx) => {
+      const r = await tx.query<{ id: string }>(sql`SELECT id FROM app.patients`);
       return r.rows.map((x) => x.id);
     });
     expect([...rows].sort()).toEqual([fx.patientA, fx.patientA2, fx.patientB].sort());
+  });
+
+  it('the elevation is recorded, with its reason, before anything is read', async () => {
+    await withPlatformAdmin(fx.adminUser, 'investigating duplicate invoice', async (tx) => {
+      await tx.query(sql`SELECT id FROM app.patients`);
+    });
+    const ev = await owner.query<{ payload: { admin_user_id: string; reason: string } }>(
+      `SELECT payload FROM app.system_events
+        WHERE event_type = 'platform_admin.elevated'
+        ORDER BY occurred_at DESC LIMIT 1`,
+    );
+    expect(ev.rows[0]?.payload.reason).toBe('investigating duplicate invoice');
+    expect(ev.rows[0]?.payload.admin_user_id).toBe(fx.adminUser);
+  });
+
+  it('a rolled-back elevation leaves no record of access that never happened', async () => {
+    const before = await owner.query<{ n: string }>(
+      `SELECT count(*)::text AS n FROM app.system_events WHERE event_type = 'platform_admin.elevated'`,
+    );
+    await expect(
+      withPlatformAdmin(fx.adminUser, 'will fail', async (tx) => {
+        await tx.query(sql`SELECT id FROM app.patients`);
+        throw new Error('deliberate');
+      }),
+    ).rejects.toThrow('deliberate');
+    const after = await owner.query<{ n: string }>(
+      `SELECT count(*)::text AS n FROM app.system_events WHERE event_type = 'platform_admin.elevated'`,
+    );
+    expect(after.rows[0]?.n).toBe(before.rows[0]?.n);
+  });
+
+  it('a non-admin asking to elevate is refused loudly, not downgraded silently', async () => {
+    // A silent downgrade would hand the caller zero rows and let it conclude the
+    // data is missing rather than that it lacked permission.
+    await expect(
+      withPlatformAdmin(fx.userA, 'trying it on', async (tx) => {
+        await tx.query(sql`SELECT 1`);
+      }),
+    ).rejects.toThrow(/not an active platform admin/i);
+  });
+
+  it('an expired grant cannot elevate', async () => {
+    await owner.query(
+      `UPDATE app.platform_admins SET expires_at = now() - interval '1 day' WHERE user_id = $1`,
+      [fx.adminUser],
+    );
+    try {
+      await expect(
+        withPlatformAdmin(fx.adminUser, 'after hours', async (tx) => {
+          await tx.query(sql`SELECT 1`);
+        }),
+      ).rejects.toThrow(/not an active platform admin/i);
+    } finally {
+      await owner.query(`UPDATE app.platform_admins SET expires_at = NULL WHERE user_id = $1`, [
+        fx.adminUser,
+      ]);
+    }
+  });
+
+  it('withPlatformAdmin still refuses an empty reason', async () => {
+    await expect(
+      withPlatformAdmin(fx.adminUser, '   ', async (tx) => {
+        await tx.query(sql`SELECT 1`);
+      }),
+    ).rejects.toThrow(/requires a reason/i);
   });
 
   it('a clinic user cannot read the platform_admins table', async () => {
@@ -293,8 +380,6 @@ describe('platform administration is separate and explicit', () => {
   });
 
   it('a clinic user cannot widen their own membership', async () => {
-    // The DB derives context from clinic_users, so writing that table would be
-    // the way to escalate. The policy on it is what closes the loop.
     await expect(
       asUser(fx.userA, (c) =>
         c.query(

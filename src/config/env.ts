@@ -15,6 +15,12 @@ const serverSchema = z.object({
   DATABASE_URL: z.string().url(),
   DATABASE_URL_UNPOOLED: z.string().url().optional(),
 
+  // Better Auth connects as clinic_os_auth, which reaches app."user",
+  // app."session", app."account" and app."verification" and nothing else.
+  // clinic_os_app has no grant on those tables at all, so injection in the
+  // tenant path cannot reach a session token or a password hash.
+  DATABASE_URL_AUTH: z.string().url().optional(),
+
   PLATFORM_ROOT_DOMAIN: z.string().min(1).default('localhost:3000'),
 });
 

@@ -1,4 +1,4 @@
-import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest';
 import type { Client, Pool, PoolClient } from 'pg';
 import { appPool, ownerClient, seed, truncateAll, type Fixture } from '../helpers/db';
 
@@ -244,13 +244,92 @@ describe('double booking is prevented by the database, not by application checks
   const slot = '2026-09-01T10:00:00+05:30';
   const slotEnd = '2026-09-01T10:30:00+05:30';
 
-  it('rejects a second booking overlapping the same doctor', async () => {
-    // Deliberately NOT inside one transaction with a prior read: application-side
-    // "is this slot free?" loses the race by construction, because two requests
-    // can both read free before either writes. The EXCLUDE constraint is what
-    // actually holds.
+  afterEach(async () => {
+    await owner.query('DELETE FROM app.appointments');
+  });
+
+  it('rejects a genuinely concurrent second booking for the same doctor', async () => {
+    // Two real connections, two real overlapping transactions.
+    //
+    // The previous version of this test opened ONE transaction and did both
+    // INSERTs inside it, while its comment claimed the opposite. That never
+    // exercised the path M6 will actually hit: under real concurrency the second
+    // inserter BLOCKS on the exclusion constraint until the first transaction
+    // resolves, and only then succeeds or fails. Blocking across a network round
+    // trip inside a request handler is the behaviour that matters.
+    const a = await pool.connect();
+    const b = await pool.connect();
+    try {
+      await a.query('BEGIN');
+      await a.query('SELECT app.set_tenant_context($1)', [fx.userA]);
+      await b.query('BEGIN');
+      await b.query('SELECT app.set_tenant_context($1)', [fx.userA]);
+
+      await a.query(
+        `INSERT INTO app.appointments
+           (organization_id, clinic_id, patient_id, doctor_id, starts_at, ends_at, status)
+         VALUES ($1, $2, $3, $4, $5, $6, 'booked')`,
+        [fx.orgA, fx.clinicA, fx.patientA, fx.doctorA, slot, slotEnd],
+      );
+
+      // Deliberately NOT awaited here: this blocks on A's lock until A resolves.
+      // A rejection handler is attached IMMEDIATELY, though — without one the
+      // rejection is briefly unhandled between creation and assertion, which
+      // vitest 4 correctly fails the run for.
+      const bSettled = b
+        .query(
+          `INSERT INTO app.appointments
+             (organization_id, clinic_id, patient_id, doctor_id, starts_at, ends_at, status)
+           VALUES ($1, $2, $3, $4, $5, $6, 'booked')`,
+          [fx.orgA, fx.clinicA, fx.patientA2, fx.doctorA, '2026-09-01T10:15:00+05:30', slotEnd],
+        )
+        .then(
+          () => null,
+          (e: unknown) => e,
+        );
+
+      await a.query('COMMIT');
+
+      const rejection = await bSettled;
+      expect(rejection).not.toBeNull();
+      expect(String(rejection)).toMatch(
+        /appointments_no_double_booking|conflicting key|exclusion/i,
+      );
+      await b.query('ROLLBACK');
+    } finally {
+      a.release();
+      b.release();
+    }
+  });
+
+  it('frees the slot when an existing booking is actually cancelled', async () => {
+    // The previous version inserted a row that was ALREADY 'cancelled', so it
+    // never exercised the partial-index predicate transition it claimed to test.
     const client = await pool.connect();
     try {
+      await client.query('BEGIN');
+      await client.query('SELECT app.set_tenant_context($1)', [fx.userA]);
+
+      const first = await client.query<{ id: string }>(
+        `INSERT INTO app.appointments
+           (organization_id, clinic_id, patient_id, doctor_id, starts_at, ends_at, status)
+         VALUES ($1, $2, $3, $4, $5, $6, 'booked') RETURNING id`,
+        [fx.orgA, fx.clinicA, fx.patientA, fx.doctorA, slot, slotEnd],
+      );
+
+      // Same slot while the first is still live: must be refused.
+      await expect(
+        client.query(
+          `INSERT INTO app.appointments
+             (organization_id, clinic_id, patient_id, doctor_id, starts_at, ends_at, status)
+           VALUES ($1, $2, $3, $4, $5, $6, 'booked')`,
+          [fx.orgA, fx.clinicA, fx.patientA2, fx.doctorA, slot, slotEnd],
+        ),
+      ).rejects.toThrow(/appointments_no_double_booking|conflicting key|exclusion/i);
+
+      await client.query('ROLLBACK');
+
+      // Now cancel it for real, and the slot must become bookable.
       await client.query('BEGIN');
       await client.query('SELECT app.set_tenant_context($1)', [fx.userA]);
       await client.query(
@@ -259,41 +338,159 @@ describe('double booking is prevented by the database, not by application checks
          VALUES ($1, $2, $3, $4, $5, $6, 'booked')`,
         [fx.orgA, fx.clinicA, fx.patientA, fx.doctorA, slot, slotEnd],
       );
-      await expect(
-        client.query(
-          `INSERT INTO app.appointments
-             (organization_id, clinic_id, patient_id, doctor_id, starts_at, ends_at, status)
-           VALUES ($1, $2, $3, $4, $5, $6, 'booked')`,
-          [fx.orgA, fx.clinicA, fx.patientA2, fx.doctorA, '2026-09-01T10:15:00+05:30', slotEnd],
-        ),
-      ).rejects.toThrow(/appointments_no_double_booking|conflicting key|exclusion/i);
-    } finally {
-      await client.query('ROLLBACK').catch(() => undefined);
-      client.release();
-    }
-  });
-
-  it('allows the same slot once the first booking is cancelled', async () => {
-    const client = await pool.connect();
-    try {
-      await client.query('BEGIN');
-      await client.query('SELECT app.set_tenant_context($1)', [fx.userA]);
-      await client.query(
-        `INSERT INTO app.appointments
-           (organization_id, clinic_id, patient_id, doctor_id, starts_at, ends_at, status)
-         VALUES ($1, $2, $3, $4, $5, $6, 'cancelled')`,
-        [fx.orgA, fx.clinicA, fx.patientA, fx.doctorA, slot, slotEnd],
-      );
-      const res = await client.query(
+      await client.query(`UPDATE app.appointments SET status = 'cancelled'`);
+      const replacement = await client.query(
         `INSERT INTO app.appointments
            (organization_id, clinic_id, patient_id, doctor_id, starts_at, ends_at, status)
          VALUES ($1, $2, $3, $4, $5, $6, 'booked') RETURNING id`,
         [fx.orgA, fx.clinicA, fx.patientA2, fx.doctorA, slot, slotEnd],
       );
-      expect(res.rowCount).toBe(1);
+      expect(replacement.rowCount).toBe(1);
+      expect(first.rowCount).toBe(1);
+      await client.query('ROLLBACK');
     } finally {
-      await client.query('ROLLBACK').catch(() => undefined);
       client.release();
     }
+  });
+});
+
+describe('append-only tables cannot be rewritten by the tenant they audit', () => {
+  it('a clinic user can write and read its own audit entries', async () => {
+    const n = await asUser(fx.userA, async (c) => {
+      await c.query(
+        `INSERT INTO app.audit_logs (organization_id, action, entity_type)
+         VALUES ($1, 'patient.updated', 'patient')`,
+        [fx.orgA],
+      );
+      const r = await c.query('SELECT id FROM app.audit_logs');
+      return r.rows.length;
+    });
+    expect(n).toBe(1);
+  });
+
+  it('cannot DELETE its own audit trail', async () => {
+    await asUser(fx.userA, async (c) => {
+      await c.query(
+        `INSERT INTO app.audit_logs (organization_id, action, entity_type)
+         VALUES ($1, 'invoice.deleted', 'invoice')`,
+        [fx.orgA],
+      );
+      // No DELETE policy exists, and RLS is forced, so this matches nothing.
+      const del = await c.query('DELETE FROM app.audit_logs');
+      expect(del.rowCount).toBe(0);
+    });
+  });
+
+  it('cannot UPDATE an audit entry after the fact', async () => {
+    await asUser(fx.userA, async (c) => {
+      await c.query(
+        `INSERT INTO app.audit_logs (organization_id, action, entity_type)
+         VALUES ($1, 'payment.refunded', 'payment')`,
+        [fx.orgA],
+      );
+      const upd = await c.query(`UPDATE app.audit_logs SET action = 'nothing.happened'`);
+      expect(upd.rowCount).toBe(0);
+    });
+  });
+
+  it('the same holds for access_logs and usage_events', async () => {
+    await asUser(fx.userA, async (c) => {
+      await c.query(
+        `INSERT INTO app.access_logs (organization_id, resource_type, action)
+         VALUES ($1, 'patient', 'read')`,
+        [fx.orgA],
+      );
+      expect((await c.query('DELETE FROM app.access_logs')).rowCount).toBe(0);
+
+      await c.query(
+        `INSERT INTO app.usage_events (organization_id, feature_key, quantity)
+         VALUES ($1, 'whatsapp_messages', 1)`,
+        [fx.orgA],
+      );
+      expect((await c.query('DELETE FROM app.usage_events')).rowCount).toBe(0);
+    });
+  });
+});
+
+describe('errors are loggable even when there is no tenant', () => {
+  it('an untenanted error can be written', async () => {
+    // The failures that most need logging - unknown host, auth failure, pool
+    // exhaustion - have no organization_id. Under the old tenant policy
+    // NULL = ANY(...) was never TRUE, so none of them could be recorded at all.
+    const client = await pool.connect();
+    try {
+      await client.query('BEGIN');
+      // No RETURNING: under RLS, INSERT ... RETURNING also requires the new row
+      // to pass the SELECT policy, and an untenanted error row is deliberately
+      // not readable by a session with no context. The write is what matters.
+      const res = await client.query(
+        `INSERT INTO app.error_events (organization_id, level, message)
+         VALUES (NULL, 'error', 'unknown host: evil.example.com')`,
+      );
+      expect(res.rowCount).toBe(1);
+      await client.query('ROLLBACK');
+    } finally {
+      client.release();
+    }
+  });
+
+  it('a tenanted error is written and readable by its own tenant', async () => {
+    const n = await asUser(fx.userA, async (c) => {
+      await c.query(
+        `INSERT INTO app.error_events (organization_id, level, message)
+         VALUES ($1, 'error', 'pool exhausted')`,
+        [fx.orgA],
+      );
+      return (await c.query('SELECT id FROM app.error_events')).rows.length;
+    });
+    expect(n).toBe(1);
+  });
+
+  it('an error record cannot be edited or deleted', async () => {
+    await asUser(fx.userA, async (c) => {
+      await c.query(
+        `INSERT INTO app.error_events (organization_id, level, message)
+         VALUES ($1, 'fatal', 'keep me')`,
+        [fx.orgA],
+      );
+      expect((await c.query('DELETE FROM app.error_events')).rowCount).toBe(0);
+      expect((await c.query(`UPDATE app.error_events SET message = 'x'`)).rowCount).toBe(0);
+    });
+  });
+});
+
+describe('a clinic_id from another organization is unrepresentable', () => {
+  it("cannot stamp its own timeline event with another tenant's clinic", async () => {
+    // Before migration 0007 this succeeded: RLS accepted the row because
+    // organization_id was A's, and nothing constrained clinic_id at all.
+    await expect(
+      asUser(fx.userA, (c) =>
+        c.query(
+          `INSERT INTO app.patient_timeline_events
+             (organization_id, clinic_id, patient_id, event_type)
+           VALUES ($1, $2, $3, 'appointment_completed')`,
+          [fx.orgA, fx.clinicB, fx.patientA],
+        ),
+      ),
+    ).rejects.toThrow(/violates foreign key constraint/i);
+  });
+
+  it('still accepts its own clinic, and a null clinic for org-level rows', async () => {
+    const n = await asUser(fx.userA, async (c) => {
+      await c.query(
+        `INSERT INTO app.patient_timeline_events
+           (organization_id, clinic_id, patient_id, event_type)
+         VALUES ($1, $2, $3, 'appointment_completed')`,
+        [fx.orgA, fx.clinicA, fx.patientA],
+      );
+      await c.query(
+        `INSERT INTO app.patient_timeline_events
+           (organization_id, clinic_id, patient_id, event_type)
+         VALUES ($1, NULL, $2, 'lead_created')`,
+        [fx.orgA, fx.patientA],
+      );
+      return (await c.query('SELECT id FROM app.patient_timeline_events')).rows.length;
+    });
+    expect(n).toBe(2);
   });
 });
