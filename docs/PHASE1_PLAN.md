@@ -1,5 +1,6 @@
 <!-- /autoplan restore point: /Users/anupkumarsinha/.gstack/projects/sddigital-Clinic-OS/main-autoplan-restore-20260826-104139.md -->
 # Clinic Growth OS — Phase 1 Delivery Plan (M2–M13)
+This is my Abhishek's change.
 
 Derived from the approved §63 architecture proposal. `docs/MASTER_PROMPT.md` remains the
 canonical specification (§62.1); this file is the execution plan for the remaining Phase 1
